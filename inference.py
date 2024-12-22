@@ -7,7 +7,8 @@ import cv2
 import numpy as np
 import torch
 import albumentations as albu
-from catalyst.dl import SupervisedRunner
+
+# from catalyst.dl import SupervisedRunner
 from skimage.morphology import remove_small_holes, remove_small_objects
 from tools.cfg import py2cfg
 from torch import nn
@@ -32,8 +33,8 @@ def building_to_rgb(mask):
     h, w = mask.shape[0], mask.shape[1]
     mask_rgb = np.zeros(shape=(h, w, 3), dtype=np.uint8)
     mask_convert = mask[np.newaxis, :, :]
-    mask_rgb[np.all(mask_convert == 0, axis=0)] = [255, 255, 255]
-    mask_rgb[np.all(mask_convert == 1, axis=0)] = [0, 0, 0]
+    mask_rgb[np.all(mask_convert == 0, axis=0)] = [0, 0, 0]
+    mask_rgb[np.all(mask_convert == 1, axis=0)] = [255, 255, 255]
     return mask_rgb
 
 
@@ -87,14 +88,23 @@ def get_args():
         type=Path,
         required=True,
         help="Path to  huge image folder",
+        default="../data/xBD/test/images",
     )
-    arg("-c", "--config_path", type=Path, required=True, help="Path to  config")
+    arg(
+        "-c",
+        "--config_path",
+        type=Path,
+        required=True,
+        help="Path to config",
+        default="config/xBD/unetformer.py",
+    )
     arg(
         "-o",
         "--output_path",
         type=Path,
         help="Path to save resulting masks.",
         required=True,
+        default="fig_results/xbd/unetformer",
     )
     arg(
         "-t",
@@ -105,7 +115,7 @@ def get_args():
     )
     arg("-ph", "--patch-height", help="height of patch size", type=int, default=512)
     arg("-pw", "--patch-width", help="width of patch size", type=int, default=512)
-    arg("-b", "--batch-size", help="batch size", type=int, default=2)
+    arg("-b", "--batch-size", help="batch size", type=int, default=4)
     arg(
         "-d",
         "--dataset",
@@ -142,21 +152,31 @@ class InferenceDataset(Dataset):
         self.transform = transform
 
     def __getitem__(self, index):
-        img = self.tile_list[index]
+        patch = self.tile_list[index]
+        if isinstance(patch, tuple):
+            img = patch[0]
+            gt = patch[1]
+        else:
+            img = patch
+            gt = None
         img_id = index
         aug = self.transform(image=img)
         img = aug["image"]
         img = torch.from_numpy(img).permute(2, 0, 1).float()
-        results = dict(img_id=img_id, img=img)
+        results = dict(img_id=img_id, img=img, gt=gt)
         return results
 
     def __len__(self):
         return len(self.tile_list)
 
 
+def get_inf_dataset(tile_list):
+    return InferenceDataset(tile_list=tile_list)
+
+
 def make_dataset_for_one_huge_image(img_path, patch_size):
     img = cv2.imread(img_path, cv2.IMREAD_COLOR)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.cvtColor(img, cv2.IMREAD_COLOR)
     tile_list = []
     image_pad, height_pad, width_pad = get_img_padded(img.copy(), patch_size)
 
@@ -175,6 +195,36 @@ def make_dataset_for_one_huge_image(img_path, patch_size):
         output_width,
         output_height,
         image_pad,
+        img.shape,
+    )
+
+
+def make_dataset_for_one_huge_image_with_gt(img_path, gt_path, patch_size):
+    img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    gt = cv2.imread(gt_path, cv2.IMREAD_COLOR)
+    tile_list = []
+    image_pad, height_pad, width_pad = get_img_padded(img.copy(), patch_size)
+    gt_pad, _, _ = get_img_padded(gt.copy(), patch_size)
+    gt_pad = cv2.cvtColor(gt_pad, cv2.COLOR_BGR2GRAY)
+
+    output_height, output_width = image_pad.shape[0], image_pad.shape[1]
+
+    for x in range(0, output_height, patch_size[0]):
+        for y in range(0, output_width, patch_size[1]):
+            image_tile = image_pad[x : x + patch_size[0], y : y + patch_size[1]]
+            gt_tile = gt_pad[x : x + patch_size[0], y : y + patch_size[1]]
+            tile_list.append((image_tile, gt_tile))
+
+    dataset = InferenceDataset(tile_list=tile_list)
+    return (
+        dataset,
+        width_pad,
+        height_pad,
+        output_width,
+        output_height,
+        image_pad,
+        gt_pad,
         img.shape,
     )
 
@@ -208,14 +258,20 @@ def main():
         model = tta.SegmentationTTAWrapper(model, transforms)
 
     img_paths = []
-    if not os.path.exists(args.output_path):
-        os.makedirs(args.output_path)
+    os.makedirs(args.output_path, exist_ok=True)
+    os.makedirs(os.path.join(args.output_path, "logits"), exist_ok=True)
+    os.makedirs(os.path.join(args.output_path, "logits_vis"), exist_ok=True)
     for ext in ("*.tif", "*.png", "*.jpg"):
         img_paths.extend(glob.glob(os.path.join(args.image_path, ext)))
     img_paths.sort()
     # print(img_paths)
-    for img_path in img_paths:
+    gt_dir = os.path.join(os.path.dirname(args.image_path), "targets")
+    for img_path in tqdm(img_paths, position=0):
+        if "post" in img_path:
+            continue
         img_name = img_path.split("/")[-1]
+        gt_name = img_name.replace(".png", "_target.png")
+        gt_path = os.path.join(gt_dir, gt_name)
         # print('origin mask', original_mask.shape)
         (
             dataset,
@@ -224,10 +280,14 @@ def main():
             output_width,
             output_height,
             img_pad,
+            gt_pad,
             img_shape,
-        ) = make_dataset_for_one_huge_image(img_path, patch_size)
+        ) = make_dataset_for_one_huge_image_with_gt(img_path, gt_path, patch_size)
         # print('img_padded', img_pad.shape)
         output_mask = np.zeros(shape=(output_height, output_width), dtype=np.uint8)
+        output_logits = np.zeros(
+            shape=(config.num_classes, output_height, output_width)
+        )
         output_tiles = []
         k = 0
         with torch.no_grad():
@@ -237,7 +297,7 @@ def main():
                 drop_last=False,
                 shuffle=False,
             )
-            for input in tqdm(dataloader):
+            for input in tqdm(dataloader, position=1):
                 # raw_prediction NxCxHxW
                 raw_predictions = model(input["img"].cuda())
                 # print('raw_pred shape:', raw_predictions.shape)
@@ -249,8 +309,9 @@ def main():
                 # print(np.unique(predictions))
 
                 for i in range(predictions.shape[0]):
+                    logits = raw_predictions[i].cpu().numpy()
                     mask = predictions[i].cpu().numpy()
-                    output_tiles.append((mask, image_ids[i].cpu().numpy()))
+                    output_tiles.append((mask, image_ids[i].cpu().numpy(), logits))
 
         for m in range(0, output_height, patch_size[0]):
             for n in range(0, output_width, patch_size[1]):
@@ -258,9 +319,13 @@ def main():
                     output_tiles[k][0]
                 )
                 # print(output_tiles[k][1])
+                output_logits[:, m : m + patch_size[0], n : n + patch_size[1]] = (
+                    output_tiles[k][2]
+                )
                 k = k + 1
 
         output_mask = output_mask[-img_shape[0] :, -img_shape[1] :]
+        output_logits = output_logits[:, -img_shape[0] :, -img_shape[1] :]
 
         # print('mask', output_mask.shape)
         if args.dataset == "landcoverai":
@@ -275,7 +340,11 @@ def main():
             output_mask = output_mask
         # print(img_shape, output_mask.shape)
         # assert img_shape == output_mask.shape
-        cv2.imwrite(os.path.join(args.output_path, img_name), output_mask)
+        cv2.imwrite(os.path.join(args.output_path, "logits_vis", img_name), output_mask)
+        np.save(
+            os.path.join(args.output_path, "logits", img_name.replace(".png", ".npy")),
+            output_logits,
+        )
 
 
 if __name__ == "__main__":
