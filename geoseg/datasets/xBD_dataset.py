@@ -85,11 +85,27 @@ class xBDDataset(Dataset):
     def __getitem__(self, index):
         p_ratio = random.random()
         if p_ratio > self.mosaic_ratio or self.mode == "val" or self.mode == "test":
-            img, mask = self.load_img_and_mask(index)
+            img, mask = self.load_img_and_mask(
+                index,
+                self.img_ids,
+                self.data_root,
+                self.img_dir,
+                self.img_suffix,
+                self.mask_dir,
+                self.mask_suffix,
+            )
             if self.transform:
                 img, mask = self.transform(img, mask)
         else:
-            img, mask = self.load_mosaic_img_and_mask(index)
+            img, mask = self.load_mosaic_img_and_mask(
+                index,
+                self.img_ids,
+                self.data_root,
+                self.img_dir,
+                self.img_suffix,
+                self.mask_dir,
+                self.mask_suffix,
+            )
             if self.transform:
                 img, mask = self.transform(img, mask)
 
@@ -114,20 +130,32 @@ class xBDDataset(Dataset):
         img_ids = [str(id.split(".")[0]) for id in img_filename_list]
         return img_ids
 
-    def load_img_and_mask(self, index):
-        img_id = self.img_ids[index]
-        img_name = osp.join(self.data_root, self.img_dir, img_id + self.img_suffix)
-        mask_name = osp.join(self.data_root, self.mask_dir, img_id + self.mask_suffix)
+    def load_img_and_mask(
+        self, index, img_ids, data_root, img_dir, img_suffix, mask_dir, mask_suffix
+    ):
+        img_id = img_ids[index]
+        img_name = osp.join(data_root, img_dir, img_id + img_suffix)
+        mask_name = osp.join(data_root, mask_dir, img_id + mask_suffix)
         img = Image.open(img_name).convert("RGB")
         mask = Image.open(mask_name).convert("L")
         return img, mask
 
-    def load_mosaic_img_and_mask(self, index):
-        indexes = [index] + [random.randint(0, len(self.img_ids) - 1) for _ in range(3)]
-        img_a, mask_a = self.load_img_and_mask(indexes[0])
-        img_b, mask_b = self.load_img_and_mask(indexes[1])
-        img_c, mask_c = self.load_img_and_mask(indexes[2])
-        img_d, mask_d = self.load_img_and_mask(indexes[3])
+    def load_mosaic_img_and_mask(
+        self, index, img_ids, data_root, img_dir, img_suffix, mask_dir, mask_suffix
+    ):
+        indexes = [index] + [random.randint(0, len(img_ids) - 1) for _ in range(3)]
+        img_a, mask_a = self.load_img_and_mask(
+            indexes[0], img_ids, data_root, img_dir, img_suffix, mask_dir, mask_suffix
+        )
+        img_b, mask_b = self.load_img_and_mask(
+            indexes[1], img_ids, data_root, img_dir, img_suffix, mask_dir, mask_suffix
+        )
+        img_c, mask_c = self.load_img_and_mask(
+            indexes[2], img_ids, data_root, img_dir, img_suffix, mask_dir, mask_suffix
+        )
+        img_d, mask_d = self.load_img_and_mask(
+            indexes[3], img_ids, data_root, img_dir, img_suffix, mask_dir, mask_suffix
+        )
 
         img_a, mask_a = np.array(img_a), np.array(mask_a)
         img_b, mask_b = np.array(img_b), np.array(mask_b)
@@ -177,6 +205,137 @@ class xBDDataset(Dataset):
         # print(img.shape)
 
         return img, mask
+
+
+def teq_get_training_transform():
+    train_transform = [
+        albu.RandomRotate90(p=0.5),
+        albu.Normalize(mean=[0.508, 0.458, 0.430], std=[0.194, 0.172, 0.158]),
+    ]
+    return albu.Compose(train_transform)
+
+
+def teq_train_aug(img, mask):
+    crop_aug = Compose(
+        [
+            RandomScale(scale_list=[0.5, 0.75, 1.0, 1.25, 1.5], mode="value"),
+            SmartCropV1(
+                crop_size=512, max_ratio=0.75, ignore_index=len(CLASSES), nopad=False
+            ),
+        ]
+    )
+    img, mask = crop_aug(img, mask)
+    img, mask = np.array(img), np.array(mask)
+    aug = teq_get_training_transform()(image=img.copy(), mask=mask.copy())
+    img, mask = aug["image"], aug["mask"]
+    return img, mask
+
+
+def teq_get_val_transform():
+    val_transform = [
+        albu.Normalize(mean=[0.508, 0.458, 0.430], std=[0.194, 0.172, 0.158])
+    ]
+    return albu.Compose(val_transform)
+
+
+def teq_val_aug(img, mask):
+    img, mask = np.array(img), np.array(mask)
+    aug = teq_get_val_transform()(image=img.copy(), mask=mask.copy())
+    img, mask = aug["image"], aug["mask"]
+    return img, mask
+
+
+class xBDTeqDataset(xBDDataset):
+    def __init__(
+        self,
+        teq_data_root="data/segmentation/Turkey/Islahiye/pre/test",
+        teq_img_dir="images",
+        teq_mask_dir="labels",
+        teq_img_suffix=".png",
+        teq_mask_suffix=".png",
+        teq_transform=teq_val_aug,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.teq_data_root = teq_data_root
+        self.teq_img_dir = teq_img_dir
+        self.teq_mask_dir = teq_mask_dir
+        self.teq_img_suffix = teq_img_suffix
+        self.teq_mask_suffix = teq_mask_suffix
+        self.teq_transform = teq_transform
+        self.teq_img_ids = self.get_img_ids(
+            self.teq_data_root, self.teq_img_dir, self.teq_mask_dir
+        )
+
+        if len(self.img_ids) > len(self.teq_img_ids):
+            times = len(self.img_ids) // len(self.teq_img_ids) + 1
+            self.teq_img_ids = (self.teq_img_ids * times)[: len(self.img_ids)]
+        else:
+            times = len(self.teq_img_ids) // len(self.img_ids) + 1
+            self.img_ids = (self.img_ids * times)[: len(self.teq_img_ids)]
+
+    def __getitem__(self, index):
+        p_ratio = random.random()
+        if p_ratio > self.mosaic_ratio or self.mode == "val" or self.mode == "test":
+            xbd_img, xbd_mask = self.load_img_and_mask(
+                index,
+                self.img_ids,
+                self.data_root,
+                self.img_dir,
+                self.img_suffix,
+                self.mask_dir,
+                self.mask_suffix,
+            )
+            teq_img, teq_mask = self.load_img_and_mask(
+                index,
+                self.teq_img_ids,
+                self.teq_data_root,
+                self.teq_img_dir,
+                self.teq_img_suffix,
+                self.teq_mask_dir,
+                self.teq_mask_suffix,
+            )
+            if self.transform:
+                xbd_img, xbd_mask = self.transform(xbd_img, xbd_mask)
+                teq_img, teq_mask = self.teq_transform(teq_img, teq_mask)
+        else:
+            xbd_img, xbd_mask = self.load_mosaic_img_and_mask(
+                index,
+                self.img_ids,
+                self.data_root,
+                self.img_dir,
+                self.img_suffix,
+                self.mask_dir,
+                self.mask_suffix,
+            )
+            teq_img, teq_mask = self.load_mosaic_img_and_mask(
+                index,
+                self.teq_img_ids,
+                self.teq_data_root,
+                self.teq_img_dir,
+                self.teq_img_suffix,
+                self.teq_mask_dir,
+                self.teq_mask_suffix,
+            )
+            if self.transform:
+                xbd_img, xbd_mask = self.transform(xbd_img, xbd_mask)
+                teq_img, teq_mask = self.teq_transform(teq_img, teq_mask)
+
+        xbd_img = torch.from_numpy(xbd_img).permute(2, 0, 1).float()
+        teq_img = torch.from_numpy(teq_img).permute(2, 0, 1).float()
+        xbd_mask = torch.from_numpy(xbd_mask).long()
+        teq_mask = torch.from_numpy(teq_mask / 255.0).long()
+        xbd_img_id = self.img_ids[index]
+        teq_img_id = self.teq_img_ids[index]
+        results = dict(
+            xbd_img_id=xbd_img_id,
+            xbd_img=xbd_img,
+            xbd_gt_semantic_seg=xbd_mask,
+            teq_img_id=teq_img_id,
+            teq_img=teq_img,
+            teq_gt_semantic_seg=teq_mask,
+        )
+        return results
 
 
 def show_img_mask_seg(seg_path, img_path, mask_path, start_seg_index):

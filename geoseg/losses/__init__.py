@@ -9,6 +9,7 @@ from .functional import *
 from .jaccard import *
 from .joint_loss import *
 from .lovasz import *
+from .mmd import *
 from .soft_bce import *
 from .soft_ce import *
 from .soft_f1 import *

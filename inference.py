@@ -171,7 +171,10 @@ class InferenceDataset(Dataset):
 
 
 def get_inf_dataset(tile_list):
-    return InferenceDataset(tile_list=tile_list)
+    return InferenceDataset(
+        tile_list=tile_list,
+        transform=albu.Normalize(mean=[0.352, 0.381, 0.291], std=[0.355, 0.331, 0.332]),
+    )
 
 
 def make_dataset_for_one_huge_image(img_path, patch_size):
@@ -187,7 +190,7 @@ def make_dataset_for_one_huge_image(img_path, patch_size):
             image_tile = image_pad[x : x + patch_size[0], y : y + patch_size[1]]
             tile_list.append(image_tile)
 
-    dataset = InferenceDataset(tile_list=tile_list)
+    dataset = get_inf_dataset(tile_list=tile_list)
     return (
         dataset,
         width_pad,
@@ -216,7 +219,7 @@ def make_dataset_for_one_huge_image_with_gt(img_path, gt_path, patch_size):
             gt_tile = gt_pad[x : x + patch_size[0], y : y + patch_size[1]]
             tile_list.append((image_tile, gt_tile))
 
-    dataset = InferenceDataset(tile_list=tile_list)
+    dataset = get_inf_dataset(tile_list=tile_list)
     return (
         dataset,
         width_pad,
@@ -266,7 +269,7 @@ def main():
     img_paths.sort()
     # print(img_paths)
     gt_dir = os.path.join(os.path.dirname(args.image_path), "targets")
-    for img_path in tqdm(img_paths, position=0):
+    for img_path in tqdm(img_paths, leave=True, position=0):
         if "post" in img_path:
             continue
         img_name = img_path.split("/")[-1]
@@ -297,7 +300,7 @@ def main():
                 drop_last=False,
                 shuffle=False,
             )
-            for input in tqdm(dataloader, position=1):
+            for input in tqdm(dataloader, leave=False, position=1):
                 # raw_prediction NxCxHxW
                 raw_predictions = model(input["img"].cuda())
                 # print('raw_pred shape:', raw_predictions.shape)

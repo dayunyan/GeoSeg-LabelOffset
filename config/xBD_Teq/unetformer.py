@@ -1,15 +1,15 @@
 from torch.utils.data import DataLoader
 from geoseg.losses import *
 from geoseg.datasets.xBD_dataset import *
-from geoseg.models.UNetFormer import UNetFormer
+from geoseg.models.UNetFormerOutDict import UNetFormerOutDict
 from tools.utils import Lookahead
 from tools.utils import process_model_params
 
 # training hparam
-max_epoch = 105
+max_epoch = 40
 ignore_index = len(CLASSES)
-train_batch_size = 8
-val_batch_size = 8
+train_batch_size = 16
+val_batch_size = 16
 lr = 6e-4
 weight_decay = 0.01
 backbone_lr = 6e-5
@@ -18,10 +18,10 @@ num_classes = len(CLASSES)
 classes = CLASSES
 
 weights_name = "unetformer-r18-512-crop-ms-e105"
-weights_path = "model_weights/xbd/{}".format(weights_name)
+weights_path = "model_weights/xbd_teq/{}".format(weights_name)
 test_weights_name = "unetformer-r18-512-crop-ms-e105"
-log_name = "xbd/{}".format(weights_name)
-monitor = "val_F1"
+log_name = "xbd_teq/{}".format(weights_name)
+monitor = "teq_val_F1"
 monitor_mode = "max"
 save_top_k = 1
 save_last = True
@@ -37,29 +37,47 @@ backbone_pretrained_cfg_overlay = {
 }
 
 #  define the network
-net = UNetFormer(
+net = UNetFormerOutDict(
     backbone_name=backbone_name,
     num_classes=num_classes,
     pretrained_cfg_overlay=backbone_pretrained_cfg_overlay,
 )
 
 # define the loss
-loss = UnetFormerLoss(ignore_index=ignore_index)
+loss_xbd = UnetFormerLoss(ignore_index=ignore_index)
+loss_mmd = MMDLoss()
 use_aux_loss = True
 
 # define the dataloader
 
-train_dataset = xBDDataset(
-    data_root="../data/xBD/train", mode="train", mosaic_ratio=0.25, transform=train_aug
+train_dataset = xBDTeqDataset(
+    teq_data_root="../data/segmentation/Turkey/Islahiye/pre/train",
+    teq_transform=teq_train_aug,
+    data_root="../data/xBD/train",
+    mode="train",
+    mosaic_ratio=0.25,
+    transform=train_aug,
 )
 
-val_dataset = xBDDataset(data_root="../data/xBD/test", transform=val_aug)
-test_dataset = xBDDataset(data_root="../data/xBD/test", transform=val_aug)
+val_dataset = xBDTeqDataset(
+    teq_data_root="../data/segmentation/Turkey/Islahiye/pre/val",
+    teq_transform=teq_val_aug,
+    data_root="../data/xBD/test",
+    mode="val",
+    transform=val_aug,
+)
+test_dataset = xBDTeqDataset(
+    teq_data_root="../data/segmentation/Turkey/Islahiye/pre/test",
+    teq_transform=teq_val_aug,
+    data_root="../data/xBD/test",
+    mode="test",
+    transform=val_aug,
+)
 
 train_loader = DataLoader(
     dataset=train_dataset,
     batch_size=train_batch_size,
-    num_workers=2,
+    num_workers=0,
     pin_memory=True,
     shuffle=True,
     drop_last=True,
@@ -68,7 +86,7 @@ train_loader = DataLoader(
 val_loader = DataLoader(
     dataset=val_dataset,
     batch_size=val_batch_size,
-    num_workers=2,
+    num_workers=0,
     shuffle=False,
     pin_memory=True,
     drop_last=False,
