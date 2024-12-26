@@ -21,7 +21,7 @@ weights_name = "unetformer-r18-512-crop-ms-e105"
 weights_path = "model_weights/xbd_teq/{}".format(weights_name)
 test_weights_name = "unetformer-r18-512-crop-ms-e105"
 log_name = "xbd_teq/{}".format(weights_name)
-monitor = "teq_val_F1"
+monitor = "t_v_F1"
 monitor_mode = "max"
 save_top_k = 1
 save_last = True
@@ -44,6 +44,7 @@ net = UNetFormerOutDict(
 )
 
 # define the loss
+alpha = 0.1
 loss_xbd = UnetFormerLoss(ignore_index=ignore_index)
 loss_mmd = MMDLoss()
 use_aux_loss = True

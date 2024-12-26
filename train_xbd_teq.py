@@ -38,6 +38,7 @@ class Supervision_Train(pl.LightningModule):
 
         self.loss_xbd = config.loss_xbd
         self.loss_mmd = config.loss_mmd
+        self.alpha = config.alpha
 
         self.xbd_metrics_train = Evaluator(num_class=config.num_classes)
         self.xbd_metrics_val = Evaluator(num_class=config.num_classes)
@@ -78,7 +79,7 @@ class Supervision_Train(pl.LightningModule):
         )
         loss_mmd = self.loss_mmd(teq_output["embeddings"], xbd_output["embeddings"])
 
-        loss = loss_xbd + loss_mmd
+        loss = loss_xbd + self.alpha * loss_mmd
 
         if self.config.use_aux_loss:
             xbd_pre_mask = nn.Softmax(dim=1)(xbd_output["logits"])
@@ -96,7 +97,7 @@ class Supervision_Train(pl.LightningModule):
             self.teq_metrics_train.add_batch(
                 teq_mask[i].cpu().numpy(), teq_pre_mask[i].cpu().numpy()
             )
-        out = {"loss": loss, "loss_xbd": loss_xbd, "loss_mmd": loss_mmd}
+        out = {"loss": loss, "ls_x": loss_xbd, "ls_mmd": loss_mmd}
         self.training_step_outputs.append(out)
         return out
 
@@ -147,12 +148,12 @@ class Supervision_Train(pl.LightningModule):
         self.xbd_metrics_train.reset()
         self.teq_metrics_train.reset()
         log_dict = {
-            "xbd_train_mIoU": xbd_mIoU,
-            "xbd_train_F1": xbd_F1,
-            "xbd_train_OA": xbd_OA,
-            "teq_train_mIoU": teq_mIoU,
-            "teq_train_F1": teq_F1,
-            "teq_train_OA": teq_OA,
+            "x_t_mIoU": xbd_mIoU,
+            "x_t_F1": xbd_F1,
+            "x_t_OA": xbd_OA,
+            "t_t_mIoU": teq_mIoU,
+            "t_t_F1": teq_F1,
+            "t_t_OA": teq_OA,
             **self.get_avg_loss(self.training_step_outputs),
         }
         self.log_dict(log_dict, prog_bar=True)
@@ -185,8 +186,8 @@ class Supervision_Train(pl.LightningModule):
 
         out = {
             "loss_val": loss_val,
-            "loss_xbd_val": loss_xbd_val,
-            "loss_mmd_val": loss_mmd_val,
+            "ls_x_v": loss_xbd_val,
+            "ls_mmd_v": loss_mmd_val,
         }
         self.validation_step_outputs.append(out)
 
@@ -238,12 +239,12 @@ class Supervision_Train(pl.LightningModule):
         self.xbd_metrics_val.reset()
         self.teq_metrics_val.reset()
         log_dict = {
-            "xbd_val_mIoU": xbd_mIoU,
-            "xbd_val_F1": xbd_F1,
-            "xbd_val_OA": xbd_OA,
-            "teq_val_mIoU": teq_mIoU,
-            "teq_val_F1": teq_F1,
-            "teq_val_OA": teq_OA,
+            "x_v_mIoU": xbd_mIoU,
+            "x_v_F1": xbd_F1,
+            "x_v_OA": xbd_OA,
+            "t_v_mIoU": teq_mIoU,
+            "t_v_F1": teq_F1,
+            "t_v_OA": teq_OA,
             **self.get_avg_loss(self.validation_step_outputs),
         }
         self.log_dict(log_dict, prog_bar=True)
