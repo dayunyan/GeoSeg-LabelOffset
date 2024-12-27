@@ -2,14 +2,15 @@ from torch.utils.data import DataLoader
 from geoseg.losses import *
 from geoseg.datasets.xBD_dataset import *
 from geoseg.models.UNetFormerOutDict import UNetFormerOutDict
+from geoseg.models.discriminator import get_fc_discriminator
 from tools.utils import Lookahead
 from tools.utils import process_model_params
 
 # training hparam
 max_epoch = 40
 ignore_index = len(CLASSES)
-train_batch_size = 16
-val_batch_size = 16
+train_batch_size = 32
+val_batch_size = 32
 lr = 6e-4
 weight_decay = 0.01
 backbone_lr = 6e-5
@@ -18,9 +19,9 @@ num_classes = len(CLASSES)
 classes = CLASSES
 
 weights_name = "unetformer-r18-512-crop-ms-e105"
-weights_path = "model_weights/xbd_teq/{}".format(weights_name)
+weights_path = "model_weights/advent/{}".format(weights_name)
 test_weights_name = "unetformer-r18-512-crop-ms-e105"
-log_name = "xbd_teq/{}".format(weights_name)
+log_name = "advent/{}".format(weights_name)
 monitor = "t_v_F1"
 monitor_mode = "max"
 save_top_k = 1
@@ -42,11 +43,13 @@ net = UNetFormerOutDict(
     num_classes=num_classes,
     pretrained_cfg_overlay=backbone_pretrained_cfg_overlay,
 )
+disc_aux = get_fc_discriminator(num_classes, ndf=64)
+disc_main = get_fc_discriminator(num_classes, ndf=64)
 
 # define the loss
 alpha = 0.1
-loss_xbd = UnetFormerLoss(ignore_index=ignore_index)
-loss_mmd = MMDLoss()
+loss_seg = UnetFormerLoss(ignore_index=ignore_index)
+loss_bce = bce_loss
 use_aux_loss = True
 
 # define the dataloader
@@ -102,4 +105,17 @@ base_optimizer = torch.optim.AdamW(net_params, lr=lr, weight_decay=weight_decay)
 optimizer = Lookahead(base_optimizer)
 lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     optimizer, T_0=15, T_mult=2
+)
+
+optimizer_d_aux = Lookahead(
+    torch.optim.AdamW(disc_aux.parameters(), lr=lr, weight_decay=weight_decay)
+)
+lr_scheduler_d_aux = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    optimizer_d_aux, T_0=15, T_mult=2
+)
+optimizer_d_main = Lookahead(
+    torch.optim.AdamW(disc_main.parameters(), lr=lr, weight_decay=weight_decay)
+)
+lr_scheduler_d_main = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    optimizer_d_main, T_0=15, T_mult=2
 )

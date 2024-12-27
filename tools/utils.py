@@ -1,6 +1,6 @@
 from typing import Any, Callable, Dict, List, Optional, Union
 import collections
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 import copy
 import os
 import re
@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from torch import nn, Tensor
 from torch.optim import Optimizer
+
 
 def merge_dicts(*dicts: dict) -> dict:
     """Recursive dict merge.
@@ -41,7 +42,7 @@ def merge_dicts(*dicts: dict) -> dict:
 
 
 def process_model_params(
-    model:nn.Module,
+    model: nn.Module,
     layerwise_params: Dict[str, dict] = None,
     no_bias_weight_decay: bool = True,
     lr_scaling: float = 1.0,
@@ -108,6 +109,8 @@ class Lookahead(Optimizer):
         self.alpha = alpha
         self.param_groups = self.optimizer.param_groups
         self.defaults = self.optimizer.defaults
+        self._optimizer_step_pre_hooks: Dict[int, Callable] = OrderedDict()
+        self._optimizer_step_post_hooks: Dict[int, Callable] = OrderedDict()
         self.state = defaultdict(dict)
         self.fast_state = self.optimizer.state
         for group in self.param_groups:
@@ -184,7 +187,10 @@ class Lookahead(Optimizer):
 
     @classmethod
     def get_from_params(
-        cls, params: Dict, base_optimizer_params: Dict = None, **kwargs,
+        cls,
+        params: Dict,
+        base_optimizer_params: Dict = None,
+        **kwargs,
     ) -> "Lookahead":
         """@TODO: Docs. Contribution is welcome."""
         from catalyst.registry import OPTIMIZERS

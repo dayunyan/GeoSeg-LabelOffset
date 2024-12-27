@@ -4,6 +4,7 @@ from tools.cfg import py2cfg
 import os
 import torch
 from torch import nn
+import torch.nn.functional as F
 import cv2
 import numpy as np
 import argparse
@@ -11,6 +12,7 @@ from pathlib import Path
 from tools.metric import Evaluator
 from pytorch_lightning.loggers import CSVLogger
 import random
+from tools.uda import prob_2_entropy
 
 
 def seed_everything(seed):
@@ -34,10 +36,13 @@ class Supervision_Train(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.automatic_optimization = False
         self.net = config.net
+        self.disc_aux = config.disc_aux
+        self.disc_main = config.disc_main
 
-        self.loss_xbd = config.loss_xbd
-        self.loss_mmd = config.loss_mmd
+        self.loss_seg = config.loss_seg
+        self.loss_bce = config.loss_bce
         self.alpha = config.alpha
 
         self.xbd_metrics_train = Evaluator(num_class=config.num_classes)
@@ -71,25 +76,91 @@ class Supervision_Train(pl.LightningModule):
             batch["teq_img"],
             batch["teq_gt_semantic_seg"],
         )
+        optimizer, optimizer_d_aux, optimizer_d_main = self.optimizers()
+        lr_scheduler, lr_scheduler_d_aux, lr_scheduler_d_main = self.lr_schedulers()
+        source_label = 1
+        target_label = 0
 
+        # reset optimizers
+        optimizer.zero_grad()
+        optimizer_d_aux.zero_grad()
+        optimizer_d_main.zero_grad()
+        # adapt LR if needed
+        lr_scheduler.step()
+        lr_scheduler_d_aux.step()
+        lr_scheduler_d_main.step()
+
+        # UDA Training
+        # only train segnet. Don't accumulate grads in disciminators
+        for param in self.disc_aux.parameters():
+            param.requires_grad = False
+        for param in self.disc_main.parameters():
+            param.requires_grad = False
+        # train on source
         xbd_output = self.net(xbd_img)
-        teq_output = self.net(teq_img)
-        loss_xbd = self.loss_xbd(
+        loss_seg = self.loss_seg(
             (xbd_output["logits"], xbd_output["logits_aux"]), xbd_mask
         )
-        loss_mmd = self.loss_mmd(teq_output["embeddings"], xbd_output["embeddings"])
+        loss_seg.backward()
 
-        loss = loss_xbd + self.alpha * loss_mmd
+        # adversarial training ot fool the discriminator
+        teq_output = self.net(teq_img)
+        pred_trg_aux = F.interpolate(
+            teq_output["logits_aux"],
+            size=(teq_img.shape[2], teq_img.shape[3]),
+            mode="bilinear",
+        )
+        d_out_aux = self.disc_aux(prob_2_entropy(F.softmax(pred_trg_aux, dim=1)))
+        loss_adv_trg_aux = self.loss_bce(d_out_aux, source_label)
+        pred_trg_main = F.interpolate(
+            teq_output["logits"],
+            size=(teq_img.shape[2], teq_img.shape[3]),
+            mode="bilinear",
+        )
+        d_out_main = self.disc_main(prob_2_entropy(F.softmax(pred_trg_main, dim=1)))
+        loss_adv_trg_main = self.loss_bce(d_out_main, source_label)
+        loss_adv = loss_adv_trg_main + 0.2 * loss_adv_trg_aux
+        loss_adv.backward()
 
-        if self.config.use_aux_loss:
-            xbd_pre_mask = nn.Softmax(dim=1)(xbd_output["logits"])
-            teq_pre_mask = nn.Softmax(dim=1)(teq_output["logits"])
-        else:
-            xbd_pre_mask = nn.Softmax(dim=1)(xbd_output["logits"])
-            teq_pre_mask = nn.Softmax(dim=1)(teq_output["logits"])
+        # Train discriminator networks
+        # enable training mode on discriminator networks
+        for param in self.disc_aux.parameters():
+            param.requires_grad = True
+        for param in self.disc_main.parameters():
+            param.requires_grad = True
+        # train with source
+        pred_src_aux = xbd_output["logits_aux"].detach()
+        d_out_aux = self.disc_aux(prob_2_entropy(F.softmax(pred_src_aux, dim=1)))
+        loss_d_aux = self.loss_bce(d_out_aux, source_label)
+        loss_d_aux = loss_d_aux / 2
+        loss_d_aux.backward()
+        pred_src_main = xbd_output["logits"].detach()
+        d_out_main = self.disc_main(prob_2_entropy(F.softmax(pred_src_main, dim=1)))
+        loss_d_main = self.loss_bce(d_out_main, source_label)
+        loss_d_main = loss_d_main / 2
+        loss_d_main.backward()
 
-        xbd_pre_mask = xbd_pre_mask.argmax(dim=1)
-        teq_pre_mask = teq_pre_mask.argmax(dim=1)
+        # train with target
+        pred_trg_aux = pred_trg_aux.detach()
+        d_out_aux = self.disc_aux(prob_2_entropy(F.softmax(pred_trg_aux, dim=1)))
+        loss_d_aux = self.loss_bce(d_out_aux, target_label)
+        loss_d_aux = loss_d_aux / 2
+        loss_d_aux.backward()
+        pred_trg_main = pred_trg_main.detach()
+        d_out_main = self.disc_main(prob_2_entropy(F.softmax(pred_trg_main, dim=1)))
+        loss_d_main = self.loss_bce(d_out_main, target_label)
+        loss_d_main = loss_d_main / 2
+        loss_d_main.backward()
+
+        optimizer.step()
+        optimizer_d_aux.step()
+        optimizer_d_main.step()
+        lr_scheduler.step()
+        lr_scheduler_d_aux.step()
+        lr_scheduler_d_main.step()
+
+        xbd_pre_mask = nn.Softmax(dim=1)(xbd_output["logits"]).argmax(dim=1)
+        teq_pre_mask = nn.Softmax(dim=1)(teq_output["logits"]).argmax(dim=1)
         for i in range(xbd_mask.shape[0]):
             self.xbd_metrics_train.add_batch(
                 xbd_mask[i].cpu().numpy(), xbd_pre_mask[i].cpu().numpy()
@@ -97,32 +168,15 @@ class Supervision_Train(pl.LightningModule):
             self.teq_metrics_train.add_batch(
                 teq_mask[i].cpu().numpy(), teq_pre_mask[i].cpu().numpy()
             )
-        out = {"loss": loss, "ls_x": loss_xbd, "ls_mmd": loss_mmd}
+        out = {"ls_seg": loss_seg, "ls_adv": loss_adv, "ls_d": loss_d_aux + loss_d_main}
         self.training_step_outputs.append(out)
-        return out
+        # return out
 
     def on_train_epoch_end(self):
-        if "vaihingen" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_train.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_train.F1()[:-1])
-        elif "potsdam" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_train.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_train.F1()[:-1])
-        elif "whubuilding" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_train.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_train.F1()[:-1])
-        elif "massbuilding" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_train.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_train.F1()[:-1])
-        elif "cropland" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_train.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_train.F1()[:-1])
-        else:
-            xbd_mIoU = np.nanmean(self.xbd_metrics_train.Intersection_over_Union())
-            xbd_F1 = np.nanmean(self.xbd_metrics_train.F1())
-            teq_mIoU = np.nanmean(self.teq_metrics_train.Intersection_over_Union())
-            teq_F1 = np.nanmean(self.teq_metrics_train.F1())
-
+        xbd_mIoU = np.nanmean(self.xbd_metrics_train.Intersection_over_Union())
+        xbd_F1 = np.nanmean(self.xbd_metrics_train.F1())
+        teq_mIoU = np.nanmean(self.teq_metrics_train.Intersection_over_Union())
+        teq_F1 = np.nanmean(self.teq_metrics_train.F1())
         xbd_OA = np.nanmean(self.xbd_metrics_train.OA())
         xbd_iou_per_class = self.xbd_metrics_train.Intersection_over_Union()
         teq_OA = np.nanmean(self.teq_metrics_train.OA())
@@ -166,12 +220,13 @@ class Supervision_Train(pl.LightningModule):
             batch["teq_img"],
             batch["teq_gt_semantic_seg"],
         )
-        xbd_output = self.forward(xbd_img)
-        teq_output = self.forward(teq_img)
-        xbd_pre_mask = nn.Softmax(dim=1)(xbd_output["logits"])
-        teq_pre_mask = nn.Softmax(dim=1)(teq_output["logits"])
-        xbd_pre_mask = xbd_pre_mask.argmax(dim=1)
-        teq_pre_mask = teq_pre_mask.argmax(dim=1)
+        source_label = 1
+        target_label = 0
+
+        xbd_output = self(xbd_img)
+        teq_output = self(teq_img)
+        xbd_pre_mask = nn.Softmax(dim=1)(xbd_output["logits"]).argmax(dim=1)
+        teq_pre_mask = nn.Softmax(dim=1)(teq_output["logits"]).argmax(dim=1)
         for i in range(xbd_mask.shape[0]):
             self.xbd_metrics_val.add_batch(
                 xbd_mask[i].cpu().numpy(), xbd_pre_mask[i].cpu().numpy()
@@ -180,41 +235,31 @@ class Supervision_Train(pl.LightningModule):
                 teq_mask[i].cpu().numpy(), teq_pre_mask[i].cpu().numpy()
             )
 
-        loss_xbd_val = self.loss_xbd(xbd_output["logits"], xbd_mask)
-        loss_mmd_val = self.loss_mmd(teq_output["embeddings"], xbd_output["embeddings"])
-        loss_val = loss_xbd_val + loss_mmd_val
+        loss_seg_val = self.loss_seg(xbd_output["logits"], xbd_mask)
+        pred_trg_main = F.interpolate(
+            teq_output["logits"],
+            size=(teq_img.shape[2], teq_img.shape[3]),
+            mode="bilinear",
+        )
+        d_out_main = self.disc_main(prob_2_entropy(F.softmax(pred_trg_main, dim=1)))
+        loss_adv_trg_main = self.loss_bce(d_out_main, source_label)
+        loss_adv = loss_adv_trg_main
+        loss_val = loss_seg_val + loss_adv
 
         out = {
             "loss_val": loss_val,
-            "ls_x_v": loss_xbd_val,
-            "ls_mmd_v": loss_mmd_val,
+            "ls_seg_v": loss_seg_val,
+            "ls_adv_v": loss_adv,
         }
         self.validation_step_outputs.append(out)
 
         return out
 
     def on_validation_epoch_end(self):
-        if "vaihingen" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_val.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_val.F1()[:-1])
-        elif "potsdam" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_val.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_val.F1()[:-1])
-        elif "whubuilding" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_val.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_val.F1()[:-1])
-        elif "massbuilding" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_val.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_val.F1()[:-1])
-        elif "cropland" in self.config.log_name:
-            mIoU = np.nanmean(self.metrics_val.Intersection_over_Union()[:-1])
-            F1 = np.nanmean(self.metrics_val.F1()[:-1])
-        else:
-            xbd_mIoU = np.nanmean(self.xbd_metrics_val.Intersection_over_Union())
-            xbd_F1 = np.nanmean(self.xbd_metrics_val.F1())
-            teq_mIoU = np.nanmean(self.teq_metrics_val.Intersection_over_Union())
-            teq_F1 = np.nanmean(self.teq_metrics_val.F1())
-
+        xbd_mIoU = np.nanmean(self.xbd_metrics_val.Intersection_over_Union())
+        xbd_F1 = np.nanmean(self.xbd_metrics_val.F1())
+        teq_mIoU = np.nanmean(self.teq_metrics_val.Intersection_over_Union())
+        teq_F1 = np.nanmean(self.teq_metrics_val.F1())
         xbd_OA = np.nanmean(self.xbd_metrics_val.OA())
         xbd_iou_per_class = self.xbd_metrics_val.Intersection_over_Union()
         teq_OA = np.nanmean(self.teq_metrics_val.OA())
@@ -254,7 +299,16 @@ class Supervision_Train(pl.LightningModule):
         optimizer = self.config.optimizer
         lr_scheduler = self.config.lr_scheduler
 
-        return [optimizer], [lr_scheduler]
+        optimizer_d_aux = self.config.optimizer_d_aux
+        lr_scheduler_d_aux = self.config.lr_scheduler_d_aux
+        optimizer_d_main = self.config.optimizer_d_main
+        lr_scheduler_d_main = self.config.lr_scheduler_d_main
+
+        return [optimizer, optimizer_d_aux, optimizer_d_main], [
+            lr_scheduler,
+            lr_scheduler_d_aux,
+            lr_scheduler_d_main,
+        ]
 
     def train_dataloader(self):
 
