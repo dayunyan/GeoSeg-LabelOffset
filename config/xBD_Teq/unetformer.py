@@ -19,9 +19,9 @@ num_classes = len(CLASSES)
 classes = CLASSES
 
 weights_name = "unetformer-r18-512-crop-ms-e105"
-weights_path = "model_weights/advent/{}".format(weights_name)
+weights_path = "model_weights/advent_emd/{}".format(weights_name)
 test_weights_name = "unetformer-r18-512-crop-ms-e105"
-log_name = "advent/{}".format(weights_name)
+log_name = "advent_emd/{}".format(weights_name)
 monitor = "t_v_F1"
 monitor_mode = "max"
 save_top_k = 1
@@ -43,13 +43,14 @@ net = UNetFormerOutDict(
     num_classes=num_classes,
     pretrained_cfg_overlay=backbone_pretrained_cfg_overlay,
 )
-disc_aux = get_fc_discriminator(num_classes, ndf=64)
+disc_aux = get_fc_discriminator(64, ndf=128)
 disc_main = get_fc_discriminator(num_classes, ndf=64)
 
 # define the loss
 alpha = 0.1
 loss_seg = UnetFormerLoss(ignore_index=ignore_index)
 loss_bce = bce_loss
+loss_emd = diff_num_emdloss
 use_aux_loss = True
 
 # define the dataloader

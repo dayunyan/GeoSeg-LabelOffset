@@ -43,6 +43,7 @@ class Supervision_Train(pl.LightningModule):
 
         self.loss_seg = config.loss_seg
         self.loss_bce = config.loss_bce
+        self.loss_emd = config.loss_emd
         self.alpha = config.alpha
 
         self.xbd_metrics_train = Evaluator(num_class=config.num_classes)
@@ -101,7 +102,16 @@ class Supervision_Train(pl.LightningModule):
         loss_seg = self.loss_seg(
             (xbd_output["logits"], xbd_output["logits_aux"]), xbd_mask
         )
-        loss_seg.backward()
+        teq_output = self.net(teq_img)
+        loss_emd = self.loss_emd(
+            teq_output["logits"],
+            teq_mask,
+            eps=0.001,
+            max_iter=500,
+            reduction="mean",
+        )
+        loss = loss_seg + 0.0001 * loss_emd
+        loss.backward()
 
         # adversarial training ot fool the discriminator
         teq_output = self.net(teq_img)
@@ -168,7 +178,12 @@ class Supervision_Train(pl.LightningModule):
             self.teq_metrics_train.add_batch(
                 teq_mask[i].cpu().numpy(), teq_pre_mask[i].cpu().numpy()
             )
-        out = {"ls_seg": loss_seg, "ls_adv": loss_adv, "ls_d": loss_d_aux + loss_d_main}
+        out = {
+            "ls_seg": loss_seg,
+            "ls_emd": loss_emd,
+            "ls_adv": loss_adv,
+            "ls_d": loss_d_aux + loss_d_main,
+        }
         self.training_step_outputs.append(out)
         # return out
 
@@ -236,6 +251,13 @@ class Supervision_Train(pl.LightningModule):
             )
 
         loss_seg_val = self.loss_seg(xbd_output["logits"], xbd_mask)
+        loss_emd_val = self.loss_emd(
+            teq_output["logits"],
+            teq_mask,
+            eps=0.001,
+            max_iter=500,
+            reduction="mean",
+        )
         pred_trg_main = F.interpolate(
             teq_output["logits"],
             size=(teq_img.shape[2], teq_img.shape[3]),
@@ -244,11 +266,12 @@ class Supervision_Train(pl.LightningModule):
         d_out_main = self.disc_main(prob_2_entropy(F.softmax(pred_trg_main, dim=1)))
         loss_adv_trg_main = self.loss_bce(d_out_main, source_label)
         loss_adv = loss_adv_trg_main
-        loss_val = loss_seg_val + loss_adv
+        loss_val = loss_seg_val + loss_adv + 0.0001 * loss_emd_val
 
         out = {
             "loss_val": loss_val,
             "ls_seg_v": loss_seg_val,
+            "ls_emd_v": loss_emd_val,
             "ls_adv_v": loss_adv,
         }
         self.validation_step_outputs.append(out)

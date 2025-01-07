@@ -4,8 +4,8 @@
 # -o fig_results/xbd/unetformer \
 # -t 'lr' -ph 512 -pw 512 -b 4 -d "building"
 
-python inference_advent.py \
+python inference_advent_emd.py \
 -i ../data/segmentation/Turkey/Islahiye/pre/test/images \
 -c config/xBD_Teq/unetformer.py \
--o fig_results/xbd_teq/advent \
+-o fig_results/xbd_teq/advent_emd \
 -t 'lr' -ph 512 -pw 512 -b 4 -d "building"
